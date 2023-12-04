@@ -8,7 +8,26 @@ use vmm_sys_util::ioctl::{ioctl_with_ref, ioctl_with_val};
 use vmm_sys_util::syscall::SyscallReturnCode;
 use vmm_sys_util::{ioctl_io_nr, ioctl_ioc_nr, ioctl_iow_nr, ioctl_iowr_nr};
 
+/// KVM_EXIT reason if a memory fault was detected that KVM could not resolve,
+/// e.g. if a private fault happened, but the memory region does not support private
+/// page frames.
 const KVM_EXIT_MEMORY_FAULT: u32 = 38;
+
+/// KVM_EXIT_MEMORY_FAULT bit flag that indicates the fault happened on a private memory access
+const KVM_MEMORY_EXIT_FLAG_PRIVATE: u64 = 1 << 3;
+
+/// structure describing the shape of a memory access that caused a KVM_EXIT_MEMORY_FAULT
+#[allow(non_camel_case_types)]
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+struct memory {
+    flags: u64,
+    gpa: u64,
+    size: u64,
+}
+
+/// Bitflag to mark a specific (range of) page frame(s) as private
+const KVM_MEMORY_ATTRIBUTE_PRIVATE: u64 = 1u64 << 3;
 
 #[allow(non_camel_case_types)]
 #[repr(C)]
@@ -20,24 +39,13 @@ struct kvm_memory_attributes {
     flags: u64,
 }
 
-/// Hypercall uses to mark guest page frames as shared/private
+/// VM ioctl used to mark guest page frames as shared/private
 ioctl_iow_nr!(
     KVM_SET_MEMORY_ATTRIBUTES,
     KVMIO,
     0xd2,
     kvm_memory_attributes
 );
-
-///
-const KVM_MEM_PRIVATE: u32 = 1 << 2;
-const KVM_MEMORY_ATTRIBUTE_PRIVATE: u64 = 1u64 << 3;
-
-const KVM_CAP_EXIT_HYPERCALL: u32 = 201;
-// only needed in Firecracker context
-#[allow(unused)]
-const KVM_CAP_MEMORY_ATTRIBUTES: u32 = 232;
-#[allow(unused)]
-const KVM_CAP_GUEST_MEMFD: u32 = 234;
 
 #[allow(non_camel_case_types)]
 #[repr(C)]
@@ -48,7 +56,14 @@ pub struct kvm_create_guest_memfd {
     reserved: [u64; 6],
 }
 
+/// ioctl to create a guest_memfd. Has to be executed on a vm fd, to which
+/// the returned guest_memfd will be bound (e.g. it can only be used to back
+/// memory in that specific VM).
 ioctl_iowr_nr!(KVM_CREATE_GUEST_MEMFD, KVMIO, 0xd4, kvm_create_guest_memfd);
+
+/// Flag passed to [`KVM_SET_USER_MEMORY_REGION2`] to indicate that a region supports
+/// private memory.
+const KVM_MEM_PRIVATE: u32 = 1 << 2;
 
 #[allow(non_camel_case_types)]
 #[repr(C)]
@@ -65,6 +80,7 @@ struct kvm_userspace_memory_region2 {
     pad2: [u64; 14],
 }
 
+/// VM ioctl for registering memory regions that have a guest_memfd associated with them
 ioctl_iow_nr!(
     KVM_SET_USER_MEMORY_REGION2,
     KVMIO,
@@ -72,33 +88,44 @@ ioctl_iow_nr!(
     kvm_userspace_memory_region2
 );
 
-ioctl_io_nr!(KVM_CHECK_EXTENSION, KVMIO, 0x03);
-
-const KVM_MEMORY_EXIT_FLAG_PRIVATE: u64 = 1 << 3;
-
-#[allow(non_camel_case_types)]
-#[repr(C)]
-#[derive(Copy, Clone, Default)]
-struct memory {
-    flags: u64,
-    gpa: u64,
-    size: u64,
-}
-
+/// Hypercall number
 const KVM_HC_MAP_GPA_RANGE: u64 = 12;
 
+/// KVM capability gatekeeping the ability to have specific hypercalls
+/// exit to host userspace to be handled.
+const KVM_CAP_EXIT_HYPERCALL: u32 = 201;
+
+// only needed in Firecracker context
+/// KVM capability enumerated if the host support private memory
+#[allow(unused)]
+const KVM_CAP_MEMORY_ATTRIBUTES: u32 = 232;
+
+/// KVM capability enumerated if the host supports guest_memfd
+#[allow(unused)]
+const KVM_CAP_GUEST_MEMFD: u32 = 234;
+
+// VM ioctl for checking support for a specific capability
+ioctl_io_nr!(KVM_CHECK_EXTENSION, KVMIO, 0x03);
+
+/// VM type that supports guest private memory
 const KVM_X86_SW_PROTECTED_VM: u64 = 1;
 
 // Adapted from https://github.com/rust-vmm/kvm-ioctls/blob/main/src/ioctls/vcpu.rs#L2176
 fn main() {
     const GUEST_MEM_SIZE: u64 = 0x4000; // 4 pages
+    /// Guest physical address at which to write the bootstrap instructions (e.g. the code that causes a
+    /// Hlt instruction to be written to [`HALT_INSTRUCTION`])
     const BOOTSTRAP_INSTRUCTIONS: u64 = 0x1000;
 
+    /// Guest physical address at which the Hlt instruction will be written.
     const HALT_INSTRUCTION: u64 = 0x2000;
 
     let kvm = Kvm::new().unwrap();
-    let mut vm = kvm.create_vm_with_type(KVM_X86_SW_PROTECTED_VM).unwrap()
+    let mut vm = kvm.create_vm_with_type(KVM_X86_SW_PROTECTED_VM).unwrap();
 
+    // To be able to dynamically map memory in response to a [`KVM_HC_MAP_GPA_RANGE`], we need
+    // to tell KVM that it should exit to host userspace when it receives one of these.
+    // For simplicity, make it exit to host userspace on any hypercall that supports this.
     let exitable_hypercalls =
         unsafe { ioctl_with_val(&vm, KVM_CHECK_EXTENSION(), KVM_CAP_EXIT_HYPERCALL as u64) };
     assert!(exitable_hypercalls > 0);
