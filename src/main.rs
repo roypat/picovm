@@ -20,12 +20,15 @@ struct kvm_memory_attributes {
     flags: u64,
 }
 
+/// Hypercall uses to mark guest page frames as shared/private
 ioctl_iow_nr!(
     KVM_SET_MEMORY_ATTRIBUTES,
     KVMIO,
     0xd2,
     kvm_memory_attributes
 );
+
+///
 const KVM_MEM_PRIVATE: u32 = 1 << 2;
 const KVM_MEMORY_ATTRIBUTE_PRIVATE: u64 = 1u64 << 3;
 
@@ -85,7 +88,6 @@ struct memory {
 const KVM_HC_MAP_GPA_RANGE: u64 = 12;
 
 const KVM_X86_SW_PROTECTED_VM: u64 = 1;
-const USE_GUEST_MEMFD: bool = false;
 
 // Adapted from https://github.com/rust-vmm/kvm-ioctls/blob/main/src/ioctls/vcpu.rs#L2176
 fn main() {
@@ -95,11 +97,7 @@ fn main() {
     const HALT_INSTRUCTION: u64 = 0x2000;
 
     let kvm = Kvm::new().unwrap();
-    let vm = if USE_GUEST_MEMFD {
-        kvm.create_vm_with_type(KVM_X86_SW_PROTECTED_VM).unwrap()
-    } else {
-        kvm.create_vm().unwrap()
-    };
+    let mut vm = kvm.create_vm_with_type(KVM_X86_SW_PROTECTED_VM).unwrap()
 
     let exitable_hypercalls =
         unsafe { ioctl_with_val(&vm, KVM_CHECK_EXTENSION(), KVM_CAP_EXIT_HYPERCALL as u64) };
@@ -152,54 +150,36 @@ fn main() {
             .unwrap();
     }
 
-    let guest_memfd = if USE_GUEST_MEMFD {
-        let guest_memfd = SyscallReturnCode(unsafe {
-            ioctl_with_ref(
-                &vm,
-                KVM_CREATE_GUEST_MEMFD(),
-                &kvm_create_guest_memfd {
-                    size: GUEST_MEM_SIZE,
-                    flags: 0,
-                    ..Default::default()
-                },
-            )
-        })
-        .into_result()
-        .unwrap();
+    let guest_memfd = SyscallReturnCode(unsafe {
+        ioctl_with_ref(
+            &vm,
+            KVM_CREATE_GUEST_MEMFD(),
+            &kvm_create_guest_memfd {
+                size: GUEST_MEM_SIZE,
+                flags: 0,
+                ..Default::default()
+            },
+        )
+    })
+    .into_result()
+    .unwrap();
 
-        let memory_region = kvm_userspace_memory_region2 {
-            slot: 0,
-            flags: KVM_MEM_PRIVATE,
-            guest_phys_addr: 0,
-            memory_size: GUEST_MEM_SIZE,
-            userspace_addr: shared_memory as u64,
-            guest_memfd_offset: 0,
-            guest_memfd: guest_memfd as u32,
-            ..Default::default()
-        };
-
-        SyscallReturnCode(unsafe {
-            ioctl_with_ref(&vm, KVM_SET_USER_MEMORY_REGION2(), &memory_region)
-        })
-        .into_empty_result()
-        .unwrap();
-
-        guest_memfd
-    } else {
-        let memory_region = kvm_userspace_memory_region {
-            slot: 0,
-            flags: 0,
-            guest_phys_addr: 0,
-            memory_size: GUEST_MEM_SIZE,
-            userspace_addr: shared_memory as u64,
-        };
-
-        unsafe {
-            vm.set_user_memory_region(memory_region).unwrap();
-        }
-
-        0
+    let memory_region = kvm_userspace_memory_region2 {
+        slot: 0,
+        flags: KVM_MEM_PRIVATE,
+        guest_phys_addr: 0,
+        memory_size: GUEST_MEM_SIZE,
+        userspace_addr: shared_memory as u64,
+        guest_memfd_offset: 0,
+        guest_memfd: guest_memfd as u32,
+        ..Default::default()
     };
+
+    SyscallReturnCode(unsafe {
+        ioctl_with_ref(&vm, KVM_SET_USER_MEMORY_REGION2(), &memory_region)
+    })
+    .into_empty_result()
+    .unwrap();
 
     let mut vcpu_fd = vm.create_vcpu(0).unwrap();
     let mut vcpu_sregs = vcpu_fd.get_sregs().unwrap();
@@ -234,19 +214,8 @@ fn main() {
 
                 println!("Hypercall #{}!", hypercall.nr);
 
-                if hypercall.nr == KVM_HC_MAP_GPA_RANGE && USE_GUEST_MEMFD {
+                if hypercall.nr == KVM_HC_MAP_GPA_RANGE {
                     let [addr, num_pages, attributes, ..] = hypercall.args;
-                    unsafe {
-                        SyscallReturnCode(libc::fallocate(
-                            guest_memfd,
-                            libc::FALLOC_FL_KEEP_SIZE,
-                            addr as libc::off_t,
-                            (num_pages * 0x1000) as libc::off_t,
-                        ))
-                            .into_empty_result()
-                            .unwrap();
-                    }
-
                     let attrs = kvm_memory_attributes {
                         address: addr,
                         size: 0x1000 * num_pages,
