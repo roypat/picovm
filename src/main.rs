@@ -3,6 +3,8 @@
 
 use kvm_bindings::{kvm_enable_cap, kvm_userspace_memory_region, KVMIO};
 use kvm_ioctls::{Kvm, VcpuExit};
+use std::ptr::null_mut;
+use std::time::Duration;
 use vm_memory::{ReadVolatile, VolatileSlice};
 use vmm_sys_util::ioctl::{ioctl_with_ref, ioctl_with_val};
 use vmm_sys_util::syscall::SyscallReturnCode;
@@ -158,8 +160,8 @@ fn main() {
         0xba, 0x08, 0x00, // mov dx, 0x8
         0x0f, 0x01, 0xc1, // vmcall
         0xbf, 0x00, 0x20, // mov di, 0x2000
-        0xbb, 0xf4, 0x00, // mov bx, 0xf4
-        0x2e, 0x89, 0x1d, // mov [cs:di], bx
+        //0xbb, 0xf4, 0x00, // mov bx, 0xf4
+        //0x2e, 0x89, 0x1d, // mov [cs:di], bx
         0xff, 0xe7, // jmp di
     ];
 
@@ -222,6 +224,39 @@ fn main() {
     vcpu_regs.rflags = 2;
     vcpu_fd.set_regs(&vcpu_regs).unwrap();
 
+    println!("guest_memfd: {}", guest_memfd);
+    let mapped_guest_memfd = unsafe {
+        libc::mmap(
+            null_mut(),
+            0x1000,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_SHARED,
+            guest_memfd,
+            0x2000,
+        )
+    };
+
+    if mapped_guest_memfd == libc::MAP_FAILED {
+        panic!("Failed to mmap guest_memfd: {:?}", std::io::Error::last_os_error());
+    }
+    println!("Mapped guest_memfd into userspace at address {0:p}", mapped_guest_memfd);
+
+    // Write HLT instruction to start of third page (the guest will jump to the start of the third page after the hypercall).
+    unsafe {
+        std::ptr::write_volatile(mapped_guest_memfd as _, 0xf4u8);
+    }
+    println!("Wrote HLT instruction to start of third page");
+
+    // Need to unmap the memory from userspace again, otherwise setting the attribute of the
+    // mapped pages to private will result in EPERM.
+    unsafe {
+        assert_eq!(libc::munmap(mapped_guest_memfd, 0x1000), 0);
+    }
+    println!("Unmapped guest_memfd again!");
+
+    println!("Press enter to continue");
+    std::io::stdin().read_line(&mut String::new()).unwrap();
+
     // Give it a handful of tries
     for _ in 0..5 {
         match vcpu_fd.run() {
@@ -232,6 +267,23 @@ fn main() {
                 // Check we actually halted at the expected location
                 let vcpu_regs = vcpu_fd.get_regs().unwrap();
                 assert_eq!(vcpu_regs.rip, HALT_INSTRUCTION + 1);
+
+                // Yeet the private page (to test that we can punch holes with guest_memfd removed
+                // from the direct map).
+                unsafe {
+                    let ret = libc::fallocate(
+                        guest_memfd,
+                        libc::FALLOC_FL_KEEP_SIZE | libc::FALLOC_FL_PUNCH_HOLE,
+                        0x2000,
+                        0x1000,
+                    );
+                    assert_eq!(ret, 0);
+                }
+                println!("Yeeted private memory!");
+
+                std::thread::sleep(Duration::from_secs(2));
+
+                println!("Goodbye!");
 
                 return;
             }
