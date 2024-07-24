@@ -6,8 +6,11 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-kvm-bindings = "0.6.0"
-kvm-ioctls = "0.15.0"
+kvm-bindings = "0.9.0"
+kvm-ioctls = "0.17.0"
 libc = "0.2.150"
-vm-memory = "0.13.1"
-vmm-sys-util = "0.11.2"
+vm-memory = "0.14.1"
+vmm-sys-util = "0.12.1"
+
+[patch.crates-io]
+kvm-ioctls = { git = "https://github.com/MatiasVara/kvm-ioctls", branch = "add-memfd-and-set-user-mem2" }
