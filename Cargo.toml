@@ -14,3 +14,7 @@ vmm-sys-util = "0.12.1"
 
 [patch.crates-io]
 kvm-ioctls = { git = "https://github.com/MatiasVara/kvm-ioctls", branch = "add-memfd-and-set-user-mem2" }
+
+[features]
+mmap = ["guest_memfd"]
+guest_memfd = []

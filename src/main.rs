@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use kvm_bindings::{
-    kvm_create_guest_memfd, kvm_memory_attributes,
-    kvm_userspace_memory_region2, KVM_EXIT_MEMORY_FAULT, KVM_MEMORY_ATTRIBUTE_PRIVATE,
-    KVM_MEMORY_EXIT_FLAG_PRIVATE, KVM_MEM_GUEST_MEMFD,
+    kvm_create_guest_memfd, kvm_memory_attributes, kvm_userspace_memory_region2,kvm_userspace_memory_region,
+    KVM_EXIT_MEMORY_FAULT, KVM_MEMORY_ATTRIBUTE_PRIVATE, KVM_MEMORY_EXIT_FLAG_PRIVATE,
+    KVM_MEM_GUEST_MEMFD,
 };
 #[cfg(target_arch = "x86_64")]
 use kvm_ioctls::HypercallExit;
@@ -62,58 +62,75 @@ fn main() {
             )
             .unwrap();
 
-        let guest_memfd = vm
-            .create_guest_memfd(kvm_create_guest_memfd {
-                size: GUEST_MEM_SIZE,
-                flags: 0,
+        let guest_memfd = if cfg!(feature = "guest_memfd") {
+            let guest_memfd = vm
+                .create_guest_memfd(kvm_create_guest_memfd {
+                    size: GUEST_MEM_SIZE,
+                    flags: 0,
+                    ..Default::default()
+                })
+                .unwrap();
+
+            let memory_region = kvm_userspace_memory_region2 {
+                slot: 0,
+                flags: KVM_MEM_GUEST_MEMFD,
+                guest_phys_addr: 0,
+                memory_size: GUEST_MEM_SIZE,
+                userspace_addr: shared_memory as u64,
+                guest_memfd_offset: 0,
+                guest_memfd: guest_memfd as u32,
                 ..Default::default()
+            };
+
+            vm.set_user_memory_region2(memory_region).unwrap();
+
+            guest_memfd
+        } else {
+            vm.set_user_memory_region(kvm_userspace_memory_region {
+                slot: 0,
+                flags: 0,
+                guest_phys_addr: 0,
+                memory_size: GUEST_MEM_SIZE,
+                userspace_addr: shared_memory as u64,
             })
             .unwrap();
 
-        let memory_region = kvm_userspace_memory_region2 {
-            slot: 0,
-            flags: KVM_MEM_GUEST_MEMFD,
-            guest_phys_addr: 0,
-            memory_size: GUEST_MEM_SIZE,
-            userspace_addr: shared_memory as u64,
-            guest_memfd_offset: 0,
-            guest_memfd: guest_memfd as u32,
-            ..Default::default()
+            0
         };
-
-        vm.set_user_memory_region2(memory_region).unwrap();
 
         let mut vcpu_fd = vm.create_vcpu(0).unwrap();
 
         arch_setup_vcpu_state(&vm, &vcpu_fd);
 
-        println!("guest_memfd: {}", guest_memfd);
-        let mapped_guest_memfd = libc::mmap(
-            null_mut(),
-            0x1000,
-            libc::PROT_READ | libc::PROT_WRITE,
-            libc::MAP_SHARED,
-            guest_memfd,
-            0x2000,
-        );
-
-        if mapped_guest_memfd == libc::MAP_FAILED {
-            panic!(
-                "Failed to mmap guest_memfd: {:?}",
-                std::io::Error::last_os_error()
+        if cfg!(feature = "mmap") {
+            println!("guest_memfd: {}", guest_memfd);
+            let mapped_guest_memfd = libc::mmap(
+                null_mut(),
+                0x1000,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                guest_memfd,
+                0x2000,
             );
+
+            if mapped_guest_memfd == libc::MAP_FAILED {
+                panic!(
+                    "Failed to mmap guest_memfd: {:?}",
+                    std::io::Error::last_os_error()
+                );
+            }
+            println!(
+                "Mapped guest_memfd into userspace at address {0:p}",
+                mapped_guest_memfd
+            );
+
+            // Need to unmap the memory from userspace again, otherwise setting the attribute of the
+            // mapped pages to private will result in EPERM.
+            assert_eq!(libc::munmap(mapped_guest_memfd, 0x1000), 0);
+            println!("Unmapped guest_memfd again!");
         }
-        println!(
-            "Mapped guest_memfd into userspace at address {0:p}",
-            mapped_guest_memfd
-        );
 
-        // Need to unmap the memory from userspace again, otherwise setting the attribute of the
-        // mapped pages to private will result in EPERM.
-        assert_eq!(libc::munmap(mapped_guest_memfd, 0x1000), 0);
-        println!("Unmapped guest_memfd again!");
-
-        if cfg!(target_arch = "aarch64") {
+        if cfg!(target_arch = "aarch64") && cfg!(feature = "guest_memfd") {
             vm.set_memory_attributes(kvm_memory_attributes {
                 address: 0x2000,
                 size: 0x1000,
@@ -140,16 +157,18 @@ fn main() {
                         HALT_INSTRUCTION + ARCH_INSTR_LEN
                     );
 
-                    // Yeet the private page (to test that we can punch holes with guest_memfd removed
-                    // from the direct map).
-                    let ret = libc::fallocate(
-                        guest_memfd,
-                        libc::FALLOC_FL_KEEP_SIZE | libc::FALLOC_FL_PUNCH_HOLE,
-                        0x2000,
-                        0x1000,
-                    );
-                    assert_eq!(ret, 0);
-                    println!("Yeeted private memory!");
+                    if cfg!(feature = "guest_memfd") {
+                        // Yeet the private page (to test that we can punch holes with guest_memfd removed
+                        // from the direct map).
+                        let ret = libc::fallocate(
+                            guest_memfd,
+                            libc::FALLOC_FL_KEEP_SIZE | libc::FALLOC_FL_PUNCH_HOLE,
+                            0x2000,
+                            0x1000,
+                        );
+                        assert_eq!(ret, 0);
+                        println!("Yeeted private memory!");
+                    }
 
                     std::thread::sleep(Duration::from_secs(2));
 
@@ -161,7 +180,7 @@ fn main() {
                 Ok(VcpuExit::Hypercall(HypercallExit { nr, args, .. })) => {
                     println!("Hypercall #{}!", nr);
 
-                    if nr == KVM_HC_MAP_GPA_RANGE {
+                    if nr == KVM_HC_MAP_GPA_RANGE && cfg!(feature = "guest_memfd") {
                         let [addr, num_pages, attributes, ..] = args;
                         let attrs = kvm_memory_attributes {
                             address: addr,
@@ -193,7 +212,7 @@ fn main() {
                 r => {
                     let fmt = format!("{:?}", r); /* borrowchk */
                     panic!(
-                        "unexpected exit reason: {} at {}",
+                        "unexpected exit reason: {} at {:x}",
                         fmt,
                         arch_get_program_counter(&vcpu_fd)
                     );
