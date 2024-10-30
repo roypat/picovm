@@ -4,7 +4,7 @@
 use kvm_bindings::{
     kvm_create_guest_memfd, kvm_memory_attributes, kvm_userspace_memory_region2,kvm_userspace_memory_region,
     KVM_EXIT_MEMORY_FAULT, KVM_MEMORY_ATTRIBUTE_PRIVATE, KVM_MEMORY_EXIT_FLAG_PRIVATE,
-    KVM_MEM_GUEST_MEMFD,
+    KVM_MEM_GUEST_MEMFD, KVM_X86_SW_PROTECTED_VM
 };
 #[cfg(target_arch = "x86_64")]
 use kvm_ioctls::HypercallExit;
@@ -37,6 +37,13 @@ const KVM_CAP_GUEST_MEMFD: u32 = 234;
 /// Guest physical address at which to write the bootstrap instructions (e.g. the code that causes a
 /// Hlt instruction to be written to [`crate::HALT_INSTRUCTION`])
 const BOOTSTRAP_INSTRUCTIONS: u64 = 0x1000;
+
+#[cfg(target_arch = "x86_64")]
+const VM_TYPE: u64 = KVM_X86_SW_PROTECTED_VM as u64;
+
+#[cfg(target_arch = "aarch64")]
+const VM_TYPE: u64 = 0;
+
 // Adapted from https://github.com/rust-vmm/kvm-ioctls/blob/main/src/ioctls/vcpu.rs#L2176
 fn main() {
     unsafe {
@@ -46,7 +53,7 @@ fn main() {
         const HALT_INSTRUCTION: u64 = 0x2000;
 
         let kvm = Kvm::new().unwrap();
-        let vm = kvm.create_vm_with_type(0).unwrap();
+        let vm = kvm.create_vm_with_type(VM_TYPE).unwrap();
 
         arch_setup_vm(&vm);
 
@@ -66,7 +73,7 @@ fn main() {
             let guest_memfd = vm
                 .create_guest_memfd(kvm_create_guest_memfd {
                     size: GUEST_MEM_SIZE,
-                    flags: 0,
+                    flags: 1,
                     ..Default::default()
                 })
                 .unwrap();
