@@ -1,45 +1,19 @@
 // Copyright 2024 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use kvm_bindings::kvm_enable_cap;
 use kvm_bindings::KVMIO;
 use kvm_bindings::KVM_CAP_EXIT_HYPERCALL;
+use kvm_bindings::{kvm_enable_cap, KVM_X86_SW_PROTECTED_VM};
 use kvm_ioctls::{VcpuFd, VmFd};
 use vmm_sys_util::ioctl::ioctl_with_val;
 use vmm_sys_util::{ioctl_io_nr, ioctl_ioc_nr};
 
+pub const VM_TYPE: u64 = KVM_X86_SW_PROTECTED_VM as u64;
+
 // VM ioctl for checking support for a specific capability
 ioctl_io_nr!(KVM_CHECK_EXTENSION, KVMIO, 0x03);
 
-/**
-Do a KVM_HC_MAP_GPA_RANGE hypercall (ax = 12) to mark the second page (bx = page aligned address,
-cx = number of pages) as private (4th bit of dx = 1) from the guest's side
-    mov ax, 12
-    mov bx, 0x2000
-    mov cx, 0x1
-    mov dx, 0x8
-    vmcall
-Write a 'HLT' instruction (0xf4) to address 0x2000 (start of the second page), and jump to it.
-    mov di, 0x2000
-    mov bx, 0xf4
-    mov [cs:di], bx
-    jmp di
-Hex values below are a hexdump of the output of "nasm code.asm"
- */
-pub const ARCH_BOOTSTRAP_CODE: [u8; 26] = [
-    0xb8, 0x0c, 0x00, // mov ax, 12
-    0xbb, 0x00, 0x20, // mov bx, 0x2000
-    0xb9, 0x01, 0x00, // mov cx, 0x1
-    0xba, 0x08, 0x00, // mov dx, 0x8
-    0x0f, 0x01, 0xc1, // vmcall
-    0xbf, 0x00, 0x20, // mov di, 0x2000
-    0xbb, 0xf4, 0x00, // mov bx, 0xf4
-    0x2e, 0x89, 0x1d, // mov [cs:di], bx
-    0xff, 0xe7, // jmp di
-];
-
-/// The length (in bytes) of the hlt instruction we use to force a KVM_EXIT
-pub const ARCH_INSTR_LEN: u64 = 1;
+pub const ARCH_BOOTSTRAP_CODE: &[u8; 47] = include_bytes!("../code");
 
 /// Hypercall number
 pub const KVM_HC_MAP_GPA_RANGE: u64 = 12;

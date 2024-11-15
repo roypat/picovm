@@ -9,6 +9,8 @@ use kvm_bindings::{
 use kvm_ioctls::{VcpuFd, VmFd};
 use std::mem::offset_of;
 
+pub const VM_TYPE: u64 = 0; /* none yet */
+
 #[rustfmt::skip]
 pub const ARCH_BOOTSTRAP_CODE: [u8; 28] = [
     0x01, 0x00, 0x84, 0xD2,  // mov x1, #0x2000            ; address to which we write the HVC #0x0 instruction
@@ -19,9 +21,6 @@ pub const ARCH_BOOTSTRAP_CODE: [u8; 28] = [
     0x00, 0x00, 0x1D, 0x32,  // orr w0, w0, #8
     0x20, 0x00, 0x1F, 0xD6,  // br x1                      ; unconditional jump to address stored in x1 register
 ];
-
-/// The length (in bytes) of the hvc #0x0 instruction we use to force a KVM_EXIT
-pub const ARCH_INSTR_LEN: u64 = 4;
 
 /// Gets a core id.
 macro_rules! arm64_core_reg_id {

@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use kvm_bindings::{
-    kvm_create_guest_memfd, kvm_memory_attributes, kvm_userspace_memory_region2,kvm_userspace_memory_region,
-    KVM_EXIT_MEMORY_FAULT, KVM_MEMORY_ATTRIBUTE_PRIVATE, KVM_MEMORY_EXIT_FLAG_PRIVATE,
-    KVM_MEM_GUEST_MEMFD, KVM_X86_SW_PROTECTED_VM
+    kvm_create_guest_memfd, kvm_memory_attributes, kvm_userspace_memory_region,
+    kvm_userspace_memory_region2, KVM_EXIT_MEMORY_FAULT, KVM_MEMORY_ATTRIBUTE_PRIVATE,
+    KVM_MEMORY_EXIT_FLAG_PRIVATE, KVM_MEM_GUEST_MEMFD,
 };
 #[cfg(target_arch = "x86_64")]
 use kvm_ioctls::HypercallExit;
@@ -36,10 +36,7 @@ const KVM_CAP_GUEST_MEMFD: u32 = 234;
 
 /// Guest physical address at which to write the bootstrap instructions (e.g. the code that causes a
 /// Hlt instruction to be written to [`crate::HALT_INSTRUCTION`])
-const BOOTSTRAP_INSTRUCTIONS: u64 = 0x1000;
-
-#[cfg(target_arch = "x86_64")]
-const VM_TYPE: u64 = KVM_X86_SW_PROTECTED_VM as u64;
+const BOOTSTRAP_INSTRUCTIONS: u64 = 0x0;
 
 #[cfg(target_arch = "aarch64")]
 const VM_TYPE: u64 = 0;
@@ -50,7 +47,7 @@ fn main() {
         const GUEST_MEM_SIZE: u64 = 0x4000; // 4 pages
 
         /// Guest physical address at which the Hlt instruction will be written.
-        const HALT_INSTRUCTION: u64 = 0x2000;
+        const PAYLOAD_GPA: u64 = 0x2000;
 
         let kvm = Kvm::new().unwrap();
         let vm = kvm.create_vm_with_type(VM_TYPE).unwrap();
@@ -150,6 +147,8 @@ fn main() {
         println!("Press enter to continue");
         std::io::stdin().read_line(&mut String::new()).unwrap();
 
+        let mut received_mmio_write = false;
+
         // Give it a handful of tries
         for _ in 0..5 {
             match vcpu_fd.run() {
@@ -159,10 +158,7 @@ fn main() {
                     println!("Halted!");
 
                     // Check we actually halted at the expected location
-                    assert_eq!(
-                        arch_get_program_counter(&vcpu_fd),
-                        HALT_INSTRUCTION + ARCH_INSTR_LEN
-                    );
+                    assert!(arch_get_program_counter(&vcpu_fd) >= PAYLOAD_GPA);
 
                     if cfg!(feature = "guest_memfd") {
                         // Yeet the private page (to test that we can punch holes with guest_memfd removed
@@ -181,7 +177,18 @@ fn main() {
 
                     println!("Goodbye!");
 
+                    assert!(received_mmio_write);
+
                     return;
+                }
+                Ok(VcpuExit::MmioWrite(addr, data)) => {
+                    dump_interesting_memory_ranges(shared_memory);
+
+                    assert_eq!(addr, 0x4000);
+                    assert_eq!(u16::from_ne_bytes(data.try_into().unwrap()), 0x4000);
+                    assert!(arch_get_program_counter(&vcpu_fd) >= 0x2000);
+
+                    received_mmio_write = true;
                 }
                 #[cfg(target_arch = "x86_64")]
                 Ok(VcpuExit::Hypercall(HypercallExit { nr, args, .. })) => {
@@ -217,6 +224,11 @@ fn main() {
                     }
                 }
                 r => {
+                    // For local debugging of the assembly code
+                    if !cfg!(feature = "guest_memfd") {
+                        dump_interesting_memory_ranges(shared_memory);
+                    }
+
                     let fmt = format!("{:?}", r); /* borrowchk */
                     panic!(
                         "unexpected exit reason: {} at {:x}",
@@ -228,6 +240,34 @@ fn main() {
         }
 
         panic!("Did not manage to halt within 5 KVM_RUN calls :(");
+    }
+}
+
+fn dump_interesting_memory_ranges(memory: *const u8) {
+    let slice = unsafe { std::slice::from_raw_parts(memory, 0x3000) };
+
+    let mut interesting_start = None;
+
+    for i in 0..0x3000 {
+        if slice[i] != 0 && interesting_start.is_none() {
+            interesting_start = Some(i);
+        }
+
+        if let Some(start) = interesting_start {
+            // hopefully there's no instruction with 0 zero bytes in it?
+            if let [0, 0, 0, 0, ..] = slice[i..] {
+                println!("Starting at 0x{:x}: {:0>2x?}", start, &slice[start..i]);
+                interesting_start = None
+            }
+        }
+    }
+
+    if let Some(interesting_start) = interesting_start {
+        println!(
+            "Starting at 0x{:x}: {:x?}",
+            interesting_start,
+            &slice[interesting_start..]
+        );
     }
 }
 
