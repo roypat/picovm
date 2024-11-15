@@ -13,7 +13,7 @@ pub const VM_TYPE: u64 = KVM_X86_SW_PROTECTED_VM as u64;
 // VM ioctl for checking support for a specific capability
 ioctl_io_nr!(KVM_CHECK_EXTENSION, KVMIO, 0x03);
 
-pub const ARCH_BOOTSTRAP_CODE: &[u8; 47] = include_bytes!("../code");
+pub const ARCH_BOOTSTRAP_CODE: &[u8; 58] = include_bytes!("../code");
 
 /// Hypercall number
 pub const KVM_HC_MAP_GPA_RANGE: u64 = 12;

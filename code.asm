@@ -33,13 +33,21 @@ mov di, 0x2000
 jmp di
 
 ; code that should be moved to private memory and executed from there
-; first, trigger mmio write by accessing physical address 0x4000, which
-; is not backed by any guest memory (we only allocate 3 pages).
-; then, halt.
 
 .to_copy:
+    ; trigger a MMIO write by writing to physical address 0x4000,
+    ; which is not backed by any memory on the host (we only allocate 4 pages,
+    ; and 0x4000 is the first byte of the fifth page)
     mov di, 0x4000
     mov [cs:di], di
 
+    ; try to enable kvm-clock, and put its control data structure at address 0x3000
+    ; we write 0x3001 to the MSR as the lowest bit of the address is interpreted as the
+    ; "enable" bit.
+    mov ecx, 0x4b564d01
+    mov ax, 0x3001
+    wrmsr
+
+    ; halt the guest
     hlt
 .end:
