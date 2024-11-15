@@ -21,11 +21,10 @@ mov es, bx
 mov di, 0x2000
 mov si, .to_copy
 
-.loop:
-    movsb
+mov cx, .end
+sub cx, .to_copy
 
-    cmp si, .end
-    jne .loop
+rep movsb
 
 ; jump to the code we just moved to private memory
 
