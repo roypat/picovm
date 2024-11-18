@@ -38,9 +38,6 @@ const KVM_CAP_GUEST_MEMFD: u32 = 234;
 /// Hlt instruction to be written to [`crate::HALT_INSTRUCTION`])
 const BOOTSTRAP_INSTRUCTIONS: u64 = 0x0;
 
-#[cfg(target_arch = "aarch64")]
-const VM_TYPE: u64 = 0;
-
 // Adapted from https://github.com/rust-vmm/kvm-ioctls/blob/main/src/ioctls/vcpu.rs#L2176
 fn main() {
     unsafe {

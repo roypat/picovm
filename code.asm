@@ -5,7 +5,7 @@
 
 mov ax, 12
 mov bx, 0x2000
-mov cx, 0x1
+mov cx, 0x2
 mov dx, 0x8
 vmcall
 
